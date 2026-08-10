@@ -1,0 +1,4 @@
+# versões exatas do .venv validado em produção (2026-07-30)
+Flask==3.1.3
+requests==2.34.2
+playwright==1.61.0

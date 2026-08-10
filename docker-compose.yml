@@ -1,0 +1,55 @@
+# Bot de aprovação de pedidos (@aprova) — stack ISOLADA.
+#
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# Este arquivo NÃO cria, NÃO altera e NÃO remove nada da Evolution que já roda
+# no servidor: a rede dela entra como `external`, ou seja, o compose apenas se
+# CONECTA nela. `docker compose down` aqui derruba só este container.
+name: aprova-bot
+
+services:
+  aprova-bot:
+    build: .
+    image: aprova-bot:latest
+    container_name: aprova_bot
+    restart: unless-stopped
+
+    # segredos e config: mesmo .env do bot rodando hoje
+    env_file:
+      - .env
+    # o que MUDA dentro do container (tem prioridade sobre o .env)
+    environment:
+      BOT_HOST: "0.0.0.0"
+      BOT_PORT: "8090"
+      # no container não existe .venv — o python do sistema é o certo
+      BOT_PYTHON: "/usr/local/bin/python"
+      HEADED: "0"
+      TZ: "America/Belem"
+
+    # o Chromium usa /dev/shm; o padrão do Docker (64MB) trava aba pesada
+    shm_size: "1gb"
+
+    volumes:
+      # credenciais só em runtime, somente leitura
+      - ./.env:/app/.env:ro
+      # logs e screenshots visíveis do host (útil pra depurar)
+      - ./logs:/app/logs
+      - ./capturas:/app/capturas
+
+    ports:
+      # SOMENTE no loopback do servidor (nada exposto pra internet/LAN).
+      # Serve pra você testar com `curl http://127.0.0.1:8090/`.
+      # Se a porta 8090 já estiver ocupada no servidor, troque BOT_HOST_PORT no .env.
+      - "127.0.0.1:${BOT_HOST_PORT:-8090}:8090"
+
+    networks:
+      - evolution
+
+networks:
+  evolution:
+    # rede JÁ EXISTENTE da Evolution. `external` = o compose não cria nem apaga.
+    # Descubra o nome com:
+    #   docker inspect <container-da-evolution> -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}'
+    external: true
+    name: ${EVOLUTION_NETWORK:?defina EVOLUTION_NETWORK no .env}

@@ -1,0 +1,25 @@
+[Unit]
+Description=Bot de aprovacao de pedidos (WhatsApp via Evolution)
+Documentation=file:///home/ti-3/repo/AB_libera_pedidodo/SETUP_BOT.md
+# sobe depois da rede e do Docker (Evolution roda em container)
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=ti-3
+Group=ti-3
+WorkingDirectory=/home/ti-3/repo/AB_libera_pedidodo
+ExecStart=/home/ti-3/repo/AB_libera_pedidodo/.venv/bin/python bot_whatsapp.py
+# auto-recuperacao: se cair por qualquer motivo, sobe de novo em 5s
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+# stdout/stderr vao pro journald (veja com: journalctl -u aprova-bot -f).
+# O bot JA escreve em logs/bot.log por conta propria; por isso NAO redirecionamos
+# stdout pro arquivo (senao cada linha do log() sairia DOBRADA, como acontecia antes).
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

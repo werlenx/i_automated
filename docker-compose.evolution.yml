@@ -1,0 +1,78 @@
+# Evolution API (local) para o bot de aprovação.
+# Sobe: Evolution API (porta 8080) + Postgres + Redis, isolados dos outros bancos
+# da máquina (Postgres/Redis internos, sem porta no host).
+#
+#   docker compose -f docker-compose.evolution.yml up -d
+#   Manager (criar instância + QR):  http://localhost:8080/manager
+#
+name: evolution-aprovacao
+
+services:
+  evolution-api:
+    image: evoapicloud/evolution-api:v2.3.7
+    container_name: evolution_aprovacao
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    extra_hosts:
+      # permite a Evolution (container) alcançar o bot que roda no HOST
+      # via http://host.docker.internal:8090/webhook
+      - "host.docker.internal:host-gateway"
+    environment:
+      SERVER_URL: http://localhost:8080
+      # lida do .env (gitignored) via interpolação do docker compose
+      AUTHENTICATION_API_KEY: "${EVOLUTION_APIKEY}"
+      AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES: "true"
+      DEL_INSTANCE: "false"
+      # banco (persiste a sessão do WhatsApp entre restarts)
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://evolution:evolution@evolution-postgres:5432/evolution?schema=public
+      DATABASE_CONNECTION_CLIENT_NAME: evolution_aprovacao
+      DATABASE_SAVE_DATA_INSTANCE: "true"
+      DATABASE_SAVE_DATA_NEW_MESSAGE: "false"
+      DATABASE_SAVE_MESSAGE_UPDATE: "false"
+      DATABASE_SAVE_DATA_CONTACTS: "false"
+      DATABASE_SAVE_DATA_CHATS: "false"
+      # cache em redis
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://evolution-redis:6379/6
+      CACHE_REDIS_PREFIX_KEY: evolution
+      CACHE_REDIS_SAVE_INSTANCES: "false"
+      CACHE_LOCAL_ENABLED: "false"
+      QRCODE_LIMIT: "30"
+    depends_on:
+      evolution-postgres:
+        condition: service_healthy
+      evolution-redis:
+        condition: service_started
+    volumes:
+      - evolution_instances:/evolution/instances
+
+  evolution-postgres:
+    image: postgres:16-alpine
+    container_name: evolution_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: evolution
+      POSTGRES_PASSWORD: evolution
+      POSTGRES_DB: evolution
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evolution -d evolution"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - evolution_pgdata:/var/lib/postgresql/data
+
+  evolution-redis:
+    image: redis:7-alpine
+    container_name: evolution_redis
+    restart: unless-stopped
+    volumes:
+      - evolution_redis:/data
+
+volumes:
+  evolution_instances:
+  evolution_pgdata:
+  evolution_redis:

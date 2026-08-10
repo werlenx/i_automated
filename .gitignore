@@ -1,0 +1,11 @@
+# credenciais e segredos
+.env
+# ambiente python
+.venv/
+__pycache__/
+*.pyc
+# artefatos de execução
+capturas/
+logs/
+*.png
+*.html

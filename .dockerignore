@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+logs/
+capturas/
+*.png
+*.html
+.git/
+.claude/
+# o .env entra por bind-mount em runtime, NUNCA assado na imagem
+.env
+# artefatos que não pertencem à imagem do bot
+docker-compose*.yml
+Dockerfile
+aprova-bot.service
+inspecionar_console.js
+*.md
