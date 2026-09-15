@@ -364,13 +364,15 @@ def contar_pedidos(page):
 def _fechar_swal(page, timeout=6000):
     """Fecha o popup SweetAlert2 que o maxGestão mostra DEPOIS de confirmar uma
     autorização (ele fica na frente e bloqueia cliques, ex.: o 'Pesquisar').
-    Retorna 'success' / 'error' / 'unknown' pelo ícone, ou None se não apareceu."""
-    tipo = None
+    Retorna (tipo, texto): tipo = 'success' / 'error' / 'unknown' pelo ícone e
+    texto = a mensagem do popup (ex.: o motivo da recusa), ou (None, None) se
+    não apareceu."""
+    tipo = texto = None
     try:
         try:
             page.locator(".swal2-container").first.wait_for(state="visible", timeout=timeout)
         except Exception:
-            return None                      # nenhum popup apareceu
+            return None, None                # nenhum popup apareceu
         try:
             if page.locator(".swal2-icon.swal2-success").first.is_visible():
                 tipo = "success"
@@ -380,6 +382,19 @@ def _fechar_swal(page, timeout=6000):
                 tipo = "unknown"
         except Exception:
             tipo = "unknown"
+        # lê a mensagem ANTES de fechar. O corpo tem classe diferente conforme a
+        # versão do SweetAlert2 (html-container nas novas, content nas antigas);
+        # o título fica de fallback quando não há corpo.
+        try:
+            texto = page.evaluate("""() => {
+              const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
+              const pega = sel => { const e = document.querySelector(sel);
+                                    return e ? norm(e.innerText) : ''; };
+              return pega('.swal2-html-container') || pega('.swal2-content')
+                  || pega('.swal2-title') || null;
+            }""")
+        except Exception:
+            texto = None
         try:
             btn = page.locator("button.swal2-confirm")
             if btn.count() and btn.first.is_visible():
@@ -394,7 +409,7 @@ def _fechar_swal(page, timeout=6000):
             pass
     except Exception:
         pass
-    return tipo
+    return tipo, texto
 
 
 def _footer_total(page):
@@ -591,6 +606,37 @@ def _ler_campo_modal(page, rotulo):
         return None
 
 
+def _ler_numero_pedido(page):
+    """Nº do pedido, do título do modal ('Detalhes do Pedido Nº 1678217961').
+    É a identidade usada pra reconhecer um pedido já pulado. Busca restrita ao
+    modal aberto, pra não pegar título velho de outro pedido."""
+    js = """
+    () => {
+      const anchor = document.querySelector('input[placeholder="Saldo após aprovação do pedido"]');
+      const root = (anchor && anchor.closest(
+        'mat-dialog-container, .mat-dialog-container, [role=dialog], .modal-content, .modal')) || document.body;
+      const m = (root.innerText || '').match(/Detalhes do Pedido\\s*N\\S*\\s*(\\d+)/i);
+      return m ? m[1] : null;
+    }
+    """
+    try:
+        return page.evaluate(js)
+    except Exception:
+        return None
+
+
+def _modal_fechado(page, timeout=8000):
+    """True quando os modais do pedido (detalhe e confirmação) sumiram da tela."""
+    try:
+        page.wait_for_selector('input[placeholder="Saldo após aprovação do pedido"]',
+                               state="hidden", timeout=timeout)
+        page.wait_for_selector('input[placeholder="Observações de Autorização"]',
+                               state="hidden", timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
 def primeiro_nome(representante):
     """'60917 - ELIZANGELA MARIA DA SILVA' -> 'ELIZANGELA'.
 
@@ -625,8 +671,10 @@ def fechar_modais(page):
         pass
 
 
-def processar_pedido(page, indice, n_total):
-    """Abre o pedido de índice 'indice', lê saldo, preenche e (se live) confirma."""
+def processar_pedido(page, indice, n_total, ignorar=None):
+    """Abre o pedido de índice 'indice', lê saldo, preenche e (se live) confirma.
+    Se o pedido estiver em 'ignorar' (chaves já puladas nesta execução), só fecha
+    o modal e devolve {'ja_pulado': True} — sem clicar em Aceitar."""
     botoes = page.locator("button:has(em.editar)")
     if indice >= botoes.count():
         return None
@@ -642,8 +690,14 @@ def processar_pedido(page, indice, n_total):
     representante = _ler_campo_modal(page, "Representante")
     valor_txt = _ler_campo_modal(page, "Valor do pedido")
     valor = parse_valor(valor_txt)
-    log(f"     representante={representante!r} -> {primeiro_nome(representante)!r} | "
-        f"valor do pedido={valor_txt!r} -> {fmt(valor)}")
+    numero = _ler_numero_pedido(page)
+    chave = numero or f"{representante}|{valor_txt}"   # fallback se o título mudar
+    log(f"     pedido Nº {numero or '?'} | representante={representante!r} -> "
+        f"{primeiro_nome(representante)!r} | valor do pedido={valor_txt!r} -> {fmt(valor)}")
+    if ignorar and chave in ignorar:
+        log("     já foi pulado nesta execução — fechando sem mexer.")
+        fechar_modais(page)
+        return {"ja_pulado": True, "chave": chave}
     try:
         page.screenshot(path=str(OUT / f"det_{indice + 1:02d}.png"))
     except Exception:
@@ -743,7 +797,12 @@ def processar_pedido(page, indice, n_total):
     toggle_ok = (depois == desejado)
     resultado = {"indice": indice, "saldo": saldo, "opcao": desejado,
                  "representante": representante, "valor": valor,
-                 "toggle_ok": toggle_ok, "confirmado": False}
+                 "toggle_ok": toggle_ok, "confirmado": False,
+                 "numero": numero, "chave": chave,
+                 "motivo": None,      # por que NÃO foi confirmado (vai pro WhatsApp)
+                 # não confirmado com estado CONHECIDO (recusa do sistema ou nem
+                 # chegou a confirmar) -> o loop pode pular e seguir pro próximo
+                 "pode_pular": False}
 
     if DRY:
         log(f"     [DRY-RUN] NÃO clicando em Confirmar. (pausa {DRY_PAUSE:.0f}s p/ conferência)")
@@ -753,6 +812,8 @@ def processar_pedido(page, indice, n_total):
         if saldo is None or not toggle_ok:
             motivo = "saldo ilegível" if saldo is None else "toggle não confirmado no estado certo"
             log(f"     [LIVE] pulando confirmação por segurança ({motivo}).")
+            resultado["motivo"] = motivo
+            resultado["pode_pular"] = True       # nada foi confirmado
             fechar_modais(page)
         else:
             page.locator("m-autorizacao-pedido-confirmar button.btn-success:has-text('Confirmar')").first.click(timeout=10000)
@@ -760,9 +821,11 @@ def processar_pedido(page, indice, n_total):
             # O maxGestão responde com um popup SweetAlert (sucesso/erro). Esse é
             # o sinal de aceite mais confiável — e precisa ser fechado, senão o
             # overlay bloqueia o 'Pesquisar' do próximo pedido.
-            swal = _fechar_swal(page, timeout=15000)
+            swal, swal_msg = _fechar_swal(page, timeout=15000)
             if swal == "error":
-                log("     ! [LIVE] o sistema retornou ERRO ao confirmar — NÃO confirmado.")
+                log(f"     ! [LIVE] o sistema retornou ERRO ao confirmar — NÃO confirmado: {swal_msg!r}")
+                resultado["motivo"] = swal_msg or "o sistema retornou erro ao confirmar"
+                resultado["pode_pular"] = True   # recusa explícita do sistema
                 fechar_modais(page)
             else:
                 # sucesso (ou sem popup): confirma também pelo fechamento do modal
@@ -776,9 +839,75 @@ def processar_pedido(page, indice, n_total):
                         resultado["confirmado"] = True
                         log("     [LIVE] CONFIRMADO (popup de sucesso do sistema).")
                     else:
-                        log("     ! [LIVE] sem confirmação clara — NÃO confirmado.")
+                        log(f"     ! [LIVE] sem confirmação clara — NÃO confirmado (popup={swal_msg!r}).")
+                        resultado["motivo"] = swal_msg or "sem confirmação clara do sistema"
                     fechar_modais(page)
     return resultado
+
+
+def _loop_live(mg, total):
+    """LIVE: aprova do topo da lista e RE-PESQUISA após cada aprovação (a decisão
+    de seguir vem de sinais de render — modal fechou, pedido saiu da lista —, não
+    de 'sleep' fixo).
+
+    Pedido não confirmado com estado conhecido (recusado pelo sistema, ex.: desconto
+    acima do permitido, ou pulado antes de confirmar) CONTINUA na lista. Antes o
+    loop parava nele e, se ele ficasse no topo, travava a fila. Agora ele é anotado
+    pelo Nº e o loop segue: como sempre processamos do topo, os pulados ocupam as
+    primeiras posições e o próximo candidato é o índice len(pulados). Se a ordem do
+    grid mudar, o Nº evita repetir um pulado (no pior caso um pedido fica pro
+    próximo @aprova — nunca é aprovado errado). Casos AMBÍGUOS (exceção, sem
+    confirmação clara, modal que não fecha) continuam PARANDO."""
+    resultados = []
+    pulados = set()
+    confirmados = 0
+    restantes = total
+    i = 0
+    guard = 0
+    while i < restantes and (MAX_PEDIDOS == 0 or confirmados < MAX_PEDIDOS):
+        guard += 1
+        if guard > 2 * total + 10:
+            log("   ! limite de segurança de iterações atingido — parando.")
+            break
+        try:
+            r = processar_pedido(mg, i, restantes, ignorar=pulados)
+        except Exception as e:
+            log(f"     ! erro ao processar pedido: {e}")
+            fechar_modais(mg)
+            break
+        if not r:
+            break
+        if r.get("ja_pulado"):                # ordem mudou: passa pro seguinte
+            if not _modal_fechado(mg):
+                log("   ! modal não fechou — parando por segurança.")
+                break
+            i += 1
+            continue
+        resultados.append(r)
+        if r["confirmado"]:
+            confirmados += 1
+            antes = restantes
+            restantes = repesquisar(mg, antes=antes)
+            if restantes >= antes:
+                log(f"   ! pedido aprovado, mas a lista ainda mostra {restantes} após "
+                    "re-pesquisar — parando por segurança.")
+                break
+            log(f"   lista atualizada: {restantes} pedido(s) restante(s).")
+            i = len(pulados)
+            continue
+        if not r.get("pode_pular"):
+            log("   ! pedido não confirmado em estado ambíguo — parando para não arriscar.")
+            break
+        if not _modal_fechado(mg):
+            log("   ! pedido não confirmado e o modal não fechou — parando por segurança.")
+            break
+        pulados.add(r["chave"])
+        log(f"   ↷ pedido Nº {r.get('numero') or '?'} NÃO aprovado — pulando e seguindo com o próximo.")
+        restantes = repesquisar(mg, antes=restantes)
+        i = len(pulados)
+    if pulados:
+        log(f"   {len(pulados)} pedido(s) pulado(s) ficaram pendentes: {sorted(pulados)}")
+    return resultados
 
 
 RESULT_JSON = LOGF / "ultimo_resultado.json"
@@ -871,41 +1000,7 @@ def main():
                             log(f"     ! erro no pedido {i + 1}: {e}")
                             fechar_modais(mg)
                 else:
-                    # LIVE: processa sempre o topo da lista, confirma, e então
-                    # RE-PESQUISA para o grid re-renderizar. A decisão de continuar
-                    # vem de SINAIS de render (modal fechou = aprovado; pedido saiu
-                    # da lista = grid atualizou), não de 'sleep' fixo.
-                    processados = 0
-                    guard = 0
-                    restantes = total
-                    while restantes > 0 and (MAX_PEDIDOS == 0 or processados < MAX_PEDIDOS):
-                        guard += 1
-                        if guard > total + 5:
-                            log("   ! limite de segurança de iterações atingido — parando.")
-                            break
-                        try:
-                            r = processar_pedido(mg, 0, restantes)
-                        except Exception as e:
-                            log(f"     ! erro ao processar pedido: {e}")
-                            fechar_modais(mg)
-                            break
-                        if not r:
-                            break
-                        resultados.append(r)
-                        if not r["confirmado"]:
-                            # não foi aprovado (saldo ilegível / toggle errado /
-                            # recusa): não vai sair da lista -> para para não repetir.
-                            log("   ! pedido não foi confirmado — parando para não repetir o mesmo.")
-                            break
-                        processados += 1
-                        # re-renderiza o grid e espera o pedido aprovado SUMIR
-                        antes = restantes
-                        restantes = repesquisar(mg, antes=antes)
-                        if restantes >= antes:
-                            log(f"   ! pedido aprovado, mas a lista ainda mostra {restantes} após "
-                                "re-pesquisar — parando por segurança.")
-                            break
-                        log(f"   lista atualizada: {restantes} pedido(s) restante(s).")
+                    resultados = _loop_live(mg, total)
 
             # resumo
             log("-" * 60)
@@ -913,14 +1008,15 @@ def main():
             for r in resultados:
                 acao = "CONFIRMADO" if r["confirmado"] else ("[dry] não confirmado" if DRY else "não confirmado")
                 op = "opção LIGADA" if r["opcao"] else "opção DESLIGADA"
-                log(f"  pedido {r['indice'] + 1}: {r.get('representante') or '?'} | "
+                log(f"  pedido Nº {r.get('numero') or '?'}: {r.get('representante') or '?'} | "
                     f"valor {fmt(r.get('valor'))} | saldo {fmt(r['saldo'])} -> {op} -> {acao}")
             resumo["pedidos"] = [
                 {"indice": r["indice"], "saldo": r["saldo"], "saldo_fmt": fmt(r["saldo"]),
                  "representante": r.get("representante"),
                  "primeiro_nome": primeiro_nome(r.get("representante")),
                  "valor": r.get("valor"), "valor_fmt": fmt(r.get("valor")),
-                 "opcao_ligada": r["opcao"], "confirmado": r["confirmado"]}
+                 "opcao_ligada": r["opcao"], "confirmado": r["confirmado"],
+                 "numero": r.get("numero"), "motivo": r.get("motivo")}
                 for r in resultados
             ]
             resumo["processados"] = len(resultados)

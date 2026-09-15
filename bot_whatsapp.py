@@ -197,8 +197,14 @@ def _formatar_resumo(resumo):
         nome = (p.get("primeiro_nome") or "").strip() or "?"
         valor = (p.get("valor_fmt") or "").strip()
         # fmt() devolve "—" quando não conseguiu ler o valor
-        linhas.append(f"{icon} {nome} - R$ {valor}" if valor and valor != "—"
-                      else f"{icon} {nome}")
+        linha = (f"{icon} {nome} - R$ {valor}" if valor and valor != "—"
+                 else f"{icon} {nome}")
+        if not p.get("confirmado") and p.get("numero"):
+            linha += f" (pedido {p['numero']})"      # p/ achar no maxGestão
+        linhas.append(linha)
+        # não aprovado: devolve o motivo (ex.: a mensagem de erro do maxGestão)
+        if not p.get("confirmado") and p.get("motivo"):
+            linhas.append(f"   ↳ {p['motivo']}")
     if conf < len(peds):
         nao = len(peds) - conf
         linhas.append(f"⚠️ {nao} não confirmado(s) — confira no sistema.")
